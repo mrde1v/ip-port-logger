@@ -26,7 +26,8 @@ var (
 func main() {
 	packetCounts = make(map[string]int)
 
-	go startServer()
+	go startServer("tcp")
+	go startServer("udp")
 
 	startWorkerPool()
 
@@ -35,24 +36,50 @@ func main() {
 	select {}
 }
 
-func startServer() {
-	listener, err := net.Listen("tcp", listenAddress)
-	if err != nil {
-		fmt.Println("Error starting server:", err)
-		os.Exit(1)
-	}
-	defer listener.Close()
+func startServer(network string) {
+	var listener net.Listener
+	var err error
 
-	fmt.Printf("Server listening on %s\n", listenAddress)
-
-	for {
-		conn, err := listener.Accept()
+	if network == "tcp" {
+		listener, err = net.Listen(network, listenAddress)
 		if err != nil {
-			fmt.Println("Error accepting connection:", err)
-			continue
+			fmt.Printf("Error starting %s server: %s\n", network, err)
+			os.Exit(1)
 		}
+		defer listener.Close()
 
-		go handleConnection(conn)
+		fmt.Printf("%s Server listening on %s\n", network, listenAddress)
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				fmt.Printf("Error accepting %s connection: %s\n", network, err)
+				continue
+			}
+
+			go handleConnection(conn)
+		}
+	} else if network == "udp" {
+		udpAddr, err := net.ResolveUDPAddr(network, listenAddress)
+		if err != nil {
+			fmt.Printf("Error resolving UDP address: %s\n", err)
+			return
+		}
+		conn, err := net.ListenUDP(network, udpAddr)
+		if err != nil {
+			fmt.Printf("Error starting %s server: %s\n", network, err)
+			os.Exit(1)
+		}
+		defer conn.Close()
+
+		fmt.Printf("%s Server listening on %s\n", network, listenAddress)
+
+		for {
+			handleUDPConnection(conn)
+		}
+	} else {
+		fmt.Printf("Unsupported network type: %s\n", network)
+		os.Exit(1)
 	}
 }
 
@@ -60,7 +87,7 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
-	fmt.Printf("Connection from %s\n", remoteAddr)
+	// fmt.Printf("Connection from %s\n", remoteAddr)
 
 	reader := bufio.NewReader(conn)
 
@@ -69,7 +96,7 @@ func handleConnection(conn net.Conn) {
 		if err != nil {
 			if err.Error() == "EOF" {
 				processData(remoteAddr)
-				fmt.Printf("Connection from %s closed by the client\n", remoteAddr)
+				// fmt.Printf("Connection from %s closed by the client\n", remoteAddr)
 				return
 			}
 			fmt.Println("Error reading from connection:", err)
@@ -78,6 +105,18 @@ func handleConnection(conn net.Conn) {
 
 		go processData(remoteAddr)
 	}
+}
+
+func handleUDPConnection(conn *net.UDPConn) {
+	buffer := make([]byte, 1024)
+	_, addr, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		fmt.Printf("Error reading from UDP Connection: %s\n", err)
+		return
+	}
+
+	ipport := fmt.Sprint(addr)
+	processData(ipport)
 }
 
 func startWorkerPool() {
@@ -120,7 +159,7 @@ func logIP(ip string) {
 		return
 	}
 
-	fmt.Println("logging")
+	// fmt.Println("logging")
 
 	logMutex.Lock()
 	defer logMutex.Unlock()
@@ -135,7 +174,7 @@ func logIP(ip string) {
 	if _, err := file.WriteString(ipport[0] + "\n"); err != nil {
 		fmt.Println("Error writing to log file:", err)
 	}
-	fmt.Printf("IP %s exceeded packet limit and is logged in %s\n", ip, logFileName)
+	fmt.Printf("IP %s exceeded packet limit\n", ip)
 }
 
 func ipExistsInFile(ip string) bool {
