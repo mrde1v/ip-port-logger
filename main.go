@@ -145,10 +145,10 @@ func processData(remoteAddr string) {
 	packetCounts[remoteAddr]++
 	packetMutex.Unlock()
 
-	fmt.Println(packetCounts[remoteAddr])
+	// fmt.Println(packetCounts[remoteAddr])
 
 	if packetCounts[remoteAddr] > packetLimit {
-		logIP(remoteAddr)
+		go logIP(remoteAddr)
 		packetCounts[remoteAddr] = 0
 	}
 }
