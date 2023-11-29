@@ -11,16 +11,23 @@ import (
 )
 
 const (
-	listenAddress = "0.0.0.0:6969"
-	packetLimit   = 1
-	logFileName   = "ips.txt"
-	numWorkers    = 10
+	listenAddress         = "0.0.0.0:6969"
+	packetLimit           = 1
+	logFileName           = "ips.txt"
+	logSourcePortFileName = "srcports.txt"
+	numWorkers            = 1000
+	logInterval           = 10 * time.Second
 )
 
 var (
 	packetCounts map[string]int
 	packetMutex  sync.Mutex
 	logMutex     sync.Mutex
+	uniqueIPs    = make(map[string]struct{})
+	uniquePorts  = make(map[string]struct{})
+	uniqueMutex  sync.Mutex
+	saveLogsCh   = make(chan struct{}, 1)
+	shutdownCh   = make(chan struct{})
 )
 
 func main() {
@@ -32,6 +39,17 @@ func main() {
 	startWorkerPool()
 
 	go monitorPackets()
+
+	go func() {
+		for {
+			select {
+			case <-time.After(logInterval):
+				saveLogsCh <- struct{}{}
+			case <-shutdownCh:
+				return
+			}
+		}
+	}()
 
 	select {}
 }
@@ -87,8 +105,6 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
-	// fmt.Printf("Connection from %s\n", remoteAddr)
-
 	reader := bufio.NewReader(conn)
 
 	for {
@@ -96,7 +112,6 @@ func handleConnection(conn net.Conn) {
 		if err != nil {
 			if err.Error() == "EOF" {
 				processData(remoteAddr)
-				// fmt.Printf("Connection from %s closed by the client\n", remoteAddr)
 				return
 			}
 			fmt.Println("Error reading from connection:", err)
@@ -145,36 +160,52 @@ func processData(remoteAddr string) {
 	packetCounts[remoteAddr]++
 	packetMutex.Unlock()
 
-	// fmt.Println(packetCounts[remoteAddr])
-
 	if packetCounts[remoteAddr] > packetLimit {
 		go logIP(remoteAddr)
+		go logPort(remoteAddr)
 		packetCounts[remoteAddr] = 0
 	}
 }
 
 func logIP(ip string) {
+	uniqueMutex.Lock()
+	defer uniqueMutex.Unlock()
 	ipport := strings.Split(ip, ":")
-	if ipExistsInFile(ipport[0]) {
-		return
+
+	if _, exists := uniqueIPs[ipport[0]]; !exists {
+		uniqueIPs[ipport[0]] = struct{}{}
+		logToFile(logFileName, ipport[0])
+		fmt.Printf("IP %s exceeded packet limit\n", ip)
+	}
+}
+
+func logPort(ipport string) {
+	port := strings.Split(ipport, ":")
+	uniqueMutex.Lock()
+	defer uniqueMutex.Unlock()
+
+	if _, exists := uniquePorts[port[1]]; !exists {
+		uniquePorts[port[1]] = struct{}{}
+		logToFile(logSourcePortFileName, port[1])
+	}
+}
+
+func saveLogs() {
+	uniqueMutex.Lock()
+	defer uniqueMutex.Unlock()
+
+	for ip := range uniqueIPs {
+		ipport := strings.Split(ip, ":")
+		logToFile(logFileName, ipport[0])
+		fmt.Printf("IP %s exceeded packet limit\n", ip)
 	}
 
-	// fmt.Println("logging")
-
-	logMutex.Lock()
-	defer logMutex.Unlock()
-
-	file, err := os.OpenFile(logFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		fmt.Println("Error opening log file:", err)
-		return
+	for port := range uniquePorts {
+		logToFile(logSourcePortFileName, port)
 	}
-	defer file.Close()
 
-	if _, err := file.WriteString(ipport[0] + "\n"); err != nil {
-		fmt.Println("Error writing to log file:", err)
-	}
-	fmt.Printf("IP %s exceeded packet limit\n", ip)
+	uniqueIPs = make(map[string]struct{})
+	uniquePorts = make(map[string]struct{})
 }
 
 func ipExistsInFile(ip string) bool {
@@ -194,17 +225,56 @@ func ipExistsInFile(ip string) bool {
 	return false
 }
 
+func portExistsInFile(port string) bool {
+	file, err := os.Open(logSourcePortFileName)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == port {
+			return true
+		}
+	}
+
+	return false
+}
+
+func logToFile(fileName, entry string) {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+
+	if ipExistsInFile(entry) {
+		return
+	} else if portExistsInFile(entry) {
+		return
+	}
+
+	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Println("Error opening log file:", err)
+		return
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString(entry + "\n"); err != nil {
+		fmt.Println("Error writing to log file:", err)
+	}
+}
+
 func monitorPackets() {
 	for {
-		time.Sleep(time.Second)
-
-		packetMutex.Lock()
-		for ip, count := range packetCounts {
-			if count > packetLimit {
-				logIP(ip)
+		select {
+		case <-saveLogsCh:
+			saveLogs()
+		case <-time.After(time.Second):
+			packetMutex.Lock()
+			for ip := range packetCounts {
+				packetCounts[ip] = 0
 			}
-			packetCounts[ip] = 0
+			packetMutex.Unlock()
 		}
-		packetMutex.Unlock()
 	}
 }
